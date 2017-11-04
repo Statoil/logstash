@@ -38,8 +38,6 @@ class LogStash::Inputs::Appinsights < LogStash::Inputs::Base
 
   def get_ai_data(app_id, key, source, time)
 	uri = "#{@base_url}/#{app_id}/query?timespan=#{time}&query=#{source}| order by timestamp asc"
-	@logger.error(uri)
-	@logger.error(URI.escape(uri))
         response = RestClient.get(URI.escape(uri), :'x-api-key' => key, :accept => "application/json")
         tabledata = JSON[response]
         return tabledata
@@ -54,7 +52,7 @@ class LogStash::Inputs::Appinsights < LogStash::Inputs::Base
         end
   end
 
-  def parse_data(data, appName)
+  def parse_data(data, appName, queue)
         if data.nil?
                 return
         end
