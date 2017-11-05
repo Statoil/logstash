@@ -13,13 +13,20 @@ class LogStash::Inputs::Appinsights < LogStash::Inputs::Base
     default :codec, "json"
 
     config :apps, :validate => :hash, :required => true
-    config :base_url, :default => "https://api.applicationinsights.io/v1/apps"
-
+    config :base_url, :required => true, :default => "https://api.applicationinsights.io/v1/apps"
     config :interval, :validate => :number, :default => 60
     config :start_from_days, :validate => :number, :default => 1
+    config :since_dbpath, :validate => :string, :required => false
+
     public
     def register
         @host = Socket.gethostname
+        if @sincedb_path.nil?
+            datapath = File.join(LogStash::SETTINGS.get_value("path.data"), "plugins", "inputs", "appinsights", @pipeline_id)
+            FileUtils::mkdir_p datapath
+            @sincedb_path = File.join(datapath, ".sincedb_" + Digest::MD5.hexdigest(@path))
+        end
+        @@sincedb = read_sincedb
     end
 
     def run(queue)
@@ -108,6 +115,17 @@ class LogStash::Inputs::Appinsights < LogStash::Inputs::Base
     end
 
     def save_marker(app, timestamp)
+        @@sincedb[app] = timestamp
+        File.open(@sincedb_path, 'w') {
+            |file| file.write(@@sincedb.inspect)
+        }
+    end
+
+    def read_sincedb()
+        File.open(@sincedb_path, 'r') {
+            |file| data = file.read()
+            return data.to_hash()
+        }
     end
 
     def stop
