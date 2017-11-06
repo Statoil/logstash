@@ -12,50 +12,45 @@ class LogStash::Inputs::Appinsights < LogStash::Inputs::Base
     config_name "appinsights"
     default :codec, "json"
 
-    config :apps, :validate => :hash, :required => true
+    config :source, :validate => :string, :required => true
+    config :key, :validate => :string, :required => true
+    config :app_id, :validate => :string, :required => true
+    config :query, :validate => :string, :required => false
     config :base_url, :required => true, :default => "https://api.applicationinsights.io/v1/apps"
     config :interval, :validate => :number, :default => 60
     config :start_from_days, :validate => :number, :default => 1
-    config :since_dbpath, :validate => :string, :required => false
+    config :sincedb_path, :validate => :string, :required => false
+    
+    last_ts = nil
 
     public
     def register
         @host = Socket.gethostname
-        if @sincedb_path.nil?
-            datapath = File.join(LogStash::SETTINGS.get_value("path.data"), "plugins", "inputs", "appinsights", @pipeline_id)
-            FileUtils::mkdir_p datapath
-            @sincedb_path = File.join(datapath, ".sincedb_" + Digest::MD5.hexdigest(@path))
-        end
-        @@sincedb = read_sincedb
     end
 
     def run(queue)
         while !stop?
-            @apps.keys.each do |app_name|
-                api_key = @apps[app_name]["key"]
-                app_id = @apps[app_name]["id"]
-                source = @apps[app_name]["source"]
-	            process(app_id, api_key, source, app_name, queue)
-            end
+            process(queue)
         Stud.stoppable_sleep(@interval) { stop? }
         end # loop
     end # def run
 
-    def get_ai_data(app_id, key, source, time)
-	    uri = "#{@base_url}/#{app_id}/query?timespan=#{time}&query=#{source}| order by timestamp asc"
-        response = RestClient.get(URI.escape(uri), :'x-api-key' => key, :accept => "application/json")
+    def get_ai_data(time)
+        query = (@query || "order by timestamp asc")
+	    uri = "#{@base_url}/#{@app_id}/query?timespan=#{time}&query=#{@source}|#{query}|order by timestamp asc"
+        response = RestClient.get(URI.escape(uri), :'x-api-key' => @key, :accept => "application/json")
         tabledata = JSON[response]
         return tabledata
     end
 
-    def process(app_id, key, source, app_name, queue)
-        for time in get_time_slices(@start_from_days.days.ago)
-           data = get_ai_data(app_id, key, source, time)
-           parse_data(data, app_name, queue)
+    def process(queue)
+        for time in get_time_slices(@last_ts || @start_from_days.days.ago)
+           data = get_ai_data(time)
+           parse_data(data, queue)
         end
     end
 
-    def parse_data(data, app_name, queue)
+    def parse_data(data, queue)
         if data.nil?
             return
         end
@@ -71,15 +66,13 @@ class LogStash::Inputs::Appinsights < LogStash::Inputs::Base
             rows.each do |row|
                 e = parse_row(row, cols)
                 next if e.nil?
-                ts = Time.parse(e["timestamp"])
-                e["application"] = app_name
+                @last_ts = Time.parse(e["timestamp"])
                 @codec.decode(e.to_json()) do |event|
                    	decorate(event)
-                   	event.set("@timestamp", LogStash::Timestamp.new(ts))
+                   	event.set("@timestamp", LogStash::Timestamp.new(@last_ts))
                    	queue << event
 			    end
             end
-            save_marker(app_name, ts)
         end
     end
 
@@ -107,25 +100,11 @@ class LogStash::Inputs::Appinsights < LogStash::Inputs::Base
     end
 
     def make_timespan(timestamp)
-         ts = Time.at(time).to_datetime
+         ts = Time.at(timestamp).to_datetime
          start = ts.strftime("%Y-%m-%d %H:%M")
          end_date = (ts + 1.hour).strftime("%Y-%m-%d %H:%M")
          slice = start + "/" + end_date
          return slice
-    end
-
-    def save_marker(app, timestamp)
-        @@sincedb[app] = timestamp
-        File.open(@sincedb_path, 'w') {
-            |file| file.write(@@sincedb.inspect)
-        }
-    end
-
-    def read_sincedb()
-        File.open(@sincedb_path, 'r') {
-            |file| data = file.read()
-            return data.to_hash()
-        }
     end
 
     def stop
