@@ -15,9 +15,10 @@ class LogStash::Inputs::Appinsights < LogStash::Inputs::Base
     config :source, :validate => :string, :required => true
     config :key, :validate => :string, :required => true
     config :app_id, :validate => :string, :required => true
-    config :query, :validate => :string, :required => false
+    config :query, :validate => :string, :required => false, :default => "extend env=tostring(customDimensions.['AspNetCoreEnvironment'])| join kind=leftouter(exceptions|project error_operationId=operation_Id, outerMessage, innermostMessage,problemId, errorType=type)on $left.operation_Id == $right.error_operationId|project-away client_City, client_CountryOrRegion, client_StateOrProvince"
+    config :query_interval_hours, :validate => :number, :default => 24, :required => false
     config :base_url, :required => true, :default => "https://api.applicationinsights.io/v1/apps"
-    config :interval, :validate => :number, :default => 60
+    config :interval, :validate => :number, :default => 300
     config :start_from_days, :validate => :number, :default => 1
     config :sincedb_path, :validate => :string, :required => false
     
@@ -31,20 +32,29 @@ class LogStash::Inputs::Appinsights < LogStash::Inputs::Base
     def run(queue)
         while !stop?
             process(queue)
-        Stud.stoppable_sleep(@interval) { stop? }
-        end # loop
-    end # def run
+            Stud.stoppable_sleep(@interval) { stop? }
+        end 
+    end 
 
     def get_ai_data(time)
-        query = (@query || "order by timestamp asc")
-	    uri = "#{@base_url}/#{@app_id}/query?timespan=#{time}&query=#{@source}|#{query}|order by timestamp asc"
-        response = RestClient.get(URI.escape(uri), :'x-api-key' => @key, :accept => "application/json")
-        tabledata = JSON[response]
-        return tabledata
+        begin
+            querystring = URI.escape("timespan=#{time}&query=#{@source}|#{get_query}")
+            uri = "#{@base_url}/#{@app_id}/query?#{querystring}"
+            response = RestClient.get(uri, :'x-api-key' => @key, :accept => "application/json")
+            tabledata = JSON[response]
+            return tabledata
+        rescue JSON::ParserError => e
+            @logger.debug("[#{@app_id}] Not a valid json response - assuming no data for specified time range #{time}: #{response}")
+        rescue RestClient::ExceptionWithResponse => err
+            @logger.error("Got #{err.http_code} for request #{uri}")
+        else
+            @logger.error("Unexpected error occured")
+        end
+        return nil
     end
 
     def process(queue)
-        for time in get_time_slices(@last_ts || @start_from_days.days.ago)
+        for time in get_time_slices()
            data = get_ai_data(time)
            parse_data(data, queue)
         end
@@ -90,8 +100,9 @@ class LogStash::Inputs::Appinsights < LogStash::Inputs::Base
         return e
     end
 
-    def get_time_slices(start)
-        range = (start.to_i..Time.now.to_i).step(1.hour)
+    def get_time_slices()
+        start = get_start_time()
+        range = (start.to_i..Time.now.to_i).step(@query_interval_hours.hour)
         slices = Array.new
         range.each do |time|
             slices <<  make_timespan(time)
@@ -102,9 +113,31 @@ class LogStash::Inputs::Appinsights < LogStash::Inputs::Base
     def make_timespan(timestamp)
          ts = Time.at(timestamp).to_datetime
          start = ts.strftime("%Y-%m-%d %H:%M")
-         end_date = (ts + 1.hour).strftime("%Y-%m-%d %H:%M")
+         end_date = (ts + @query_interval_hours.hour).strftime("%Y-%m-%d %H:%M")
          slice = start + "/" + end_date
          return slice
+    end
+    
+    def get_start_time()
+        if @last_ts.nil?
+            return @start_from_days.days.ago
+        end
+        
+        if @last_ts > Time.now
+            start_time = Time.now
+        else
+            start_time = @last_ts
+        end
+        return start_time - @query_interval_hours.hour
+    end
+    
+    def get_query()
+        if @query.nil?
+            query = "order by timestamp asc"
+        else
+            query = "#{@query} | order by timestamp asc"
+        end
+        return query
     end
 
     def stop
